@@ -1,0 +1,7 @@
+numpy>=2.0
+opencv-python>=4.10
+mediapipe>=1.2,<2
+pyvirtualcam>=0.15
+pillow>=10
+pystray>=0.19; sys_platform == "win32"
+pygrabber>=0.2; sys_platform == "win32"

@@ -1,0 +1,71 @@
+# Construit Sonic Cam pour Windows, macOS (Apple Silicon) et Linux, vérifie que chaque
+# version démarre (--selftest), puis publie les archives.
+#   - Lancement manuel : onglet "Actions" > "Build Sonic Cam" > "Run workflow"
+#   - Pousser un tag v1.0, v1.1... crée en plus une "Release" avec les 3 archives
+name: Build Sonic Cam
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            exe: dist/SonicCam/SonicCam.exe
+          - os: macos-latest
+            exe: dist/SonicCam.app/Contents/MacOS/SonicCam
+          - os: ubuntu-22.04
+            exe: dist/SonicCam/SonicCam
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances système (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgl1 libegl1 libgles2 libglib2.0-0
+
+      - name: Dépendances Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build
+        run: python build.py
+
+      - name: Autotest de l'appli packagée
+        shell: bash
+        run: |
+          "${{ matrix.exe }}" --selftest selftest.txt || true
+          cat selftest.txt
+          tail -n 1 selftest.txt | grep -qx OK
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SonicCam-${{ runner.os }}
+          path: |
+            dist/SonicCam-*.zip
+            dist/SonicCam-*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
