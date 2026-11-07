@@ -20,6 +20,7 @@ Votre webcam, avec un Sonic qui débarque au hasard **toutes les 5 à 15 minutes
 - **Webcam** : choix de la vraie caméra. « Automatique » ignore les caméras virtuelles et celles qui renvoient une image noire.
 - **Fréquence** : 5 à 15 min par défaut. Il y a aussi un mode « Test : 10 à 30 s ».
 - **Effets** : discrets, normaux ou forts. **Image miroir** en option.
+- **Mode debug** : pour tester sa webcam. Supprime la limite de fps, demande à la webcam son maximum et affiche des mesures sous l'aperçu (fps de sortie, fps réels de la webcam, format négocié, temps de chaque étape). Il n'est jamais sauvegardé : au lancement suivant, l'appli repart en mode normal. On peut aussi le lancer directement avec `SonicCam.exe --debug`.
 - **Windows** : fermer la fenêtre laisse Sonic Cam tourner près de l'horloge. Clic droit sur l'icône pour quitter.
 
 Les réglages et le journal (`sonic_cam.log`, utile en cas de souci) sont enregistrés ici :
@@ -57,6 +58,8 @@ Chaque version est lancée en mode `--selftest` sur la machine de compilation : 
 ## Version script (développement)
 - `installer.bat` puis `lancer_sonic_cam.bat` (Windows), ou `python sonic_cam.py` partout.
 - Options : `--camera`, `--min-gap`, `--max-gap` (en secondes), `--size`, `--impact`, `--mirror`, `--simulate`, `--list-cameras`, `--choose-camera`.
+- Cadence : la sortie tourne à `--fps 60` par défaut (`0` = illimitée), et la webcam est lue à `--cam-fps 30`. La plupart des webcams plafonnent à 30 fps, et Teams/Discord transmettent souvent 30 fps au maximum.
+- `lancer_debug.bat` (ou `--debug`) lance le mode debug : aucune limite de fps, webcam au maximum, formats de la webcam listés au démarrage, mesures dans l'aperçu (touche D) et dans la console toutes les 5 s.
 - `python sonic_app.py` lance l'appli avec fenêtre, sans la compiler.
 
 ## Fichiers

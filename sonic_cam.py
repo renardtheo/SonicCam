@@ -17,6 +17,7 @@ import random
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 
 import cv2
@@ -63,11 +64,15 @@ class CamReader(threading.Thread):
         if self.is_file:
             self.cap = cv2.VideoCapture(source)
         else:
-            self.cap = cv2.VideoCapture(int(source), CAP_API)
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            self.cap.set(cv2.CAP_PROP_FPS, fps)
+            # Réglages passés DÈS l'ouverture : sous Windows (DirectShow), un cap.set(FOURCC) fait après coup
+            # est ignoré -> la webcam reste en YUY2, souvent limité à ~10 fps en 1280x720 (contre 30 en MJPG).
+            params = [cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"),
+                      cv2.CAP_PROP_FRAME_WIDTH, width, cv2.CAP_PROP_FRAME_HEIGHT, height, cv2.CAP_PROP_FPS, fps]
+            self.cap = cv2.VideoCapture(int(source), CAP_API, params)
+            if not self.cap.isOpened():                         # backend qui refuse un réglage : ancienne méthode
+                self.cap = cv2.VideoCapture(int(source), CAP_API)
+                for prop, val in zip(params[::2], params[1::2]):
+                    self.cap.set(prop, val)
         if not self.cap.isOpened():
             raise RuntimeError(f"Impossible d'ouvrir la caméra {source}")
         self.file_dt = 1.0 / (self.cap.get(cv2.CAP_PROP_FPS) or 30)
@@ -76,6 +81,7 @@ class CamReader(threading.Thread):
             self.cap.release()
             raise RuntimeError("La caméra ne renvoie aucune image (déjà utilisée par Teams/Discord ?)")
         self.frame = frame
+        self.seq = 0                    # n° de l'image webcam (la boucle peut tourner plus vite que la caméra)
         self.lock = threading.Lock()
         self.running = True
 
@@ -90,12 +96,26 @@ class CamReader(threading.Thread):
                 continue
             with self.lock:
                 self.frame = frame
+                self.seq += 1
             if self.is_file:
                 time.sleep(self.file_dt)
 
+    def info(self):
+        """Format réellement négocié avec la webcam (à appeler avant start())."""
+        if self.is_file:
+            return f"fichier vidéo ({1 / self.file_dt:.0f} fps)"
+        fc = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc = "".join(chr((fc >> 8 * i) & 255) for i in range(4)) if fc > 0 else "?"
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        return (f"{fourcc} {int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
+                + (f" (annonce {fps:.0f} fps)" if fps > 0 else ""))
+
     def read(self):
+        return self.read_seq()[1]
+
+    def read_seq(self):
         with self.lock:
-            return self.frame.copy()
+            return self.seq, self.frame.copy()
 
     def stop(self):
         self.running = False
@@ -749,6 +769,57 @@ def list_cameras():
     return [(i, f"Caméra {i}") for i in range(3)]
 
 
+def camera_formats(index):
+    """Formats annoncés par la webcam (Windows seulement) : {(type, largeur, hauteur): fps max}."""
+    if not IS_WIN:
+        return {}
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        g = FilterGraph()
+        g.add_video_input_device(index)
+        out = {}
+        for f in g.get_input_device().get_formats():
+            k = (f["media_type_str"], f["width"], f["height"])
+            out[k] = max(out.get(k, 0), round(f.get("max_framerate", 0)))
+        return out
+    except Exception:
+        return {}
+
+
+class Perf:
+    """Mesures du mode debug (fenêtre glissante d'1 s) : cadences et temps de chaque étape."""
+
+    def __init__(self):
+        self.t0 = time.perf_counter()
+        self.loops = self.cams = 0
+        self.acc = {}
+        self.snap = {"out": 0.0, "cam": 0.0, "ms": {}}
+
+    def add(self, key, t_start):
+        ms = (time.perf_counter() - t_start) * 1000
+        s, m = self.acc.get(key, (0.0, 0.0))
+        self.acc[key] = (s + ms, max(m, ms))
+
+    def tick(self, new_cam, now):
+        """Compte une itération ; renvoie True quand une nouvelle mesure (1 s) est prête."""
+        self.loops += 1
+        self.cams += new_cam
+        el = now - self.t0
+        if el < 1.0:
+            return False
+        self.snap = {"out": self.loops / el, "cam": self.cams / el,
+                     "ms": {k: (s / self.loops, m) for k, (s, m) in self.acc.items()}}
+        self.t0, self.loops, self.cams, self.acc = now, 0, 0, {}
+        return True
+
+    def lines(self, fps_limit):
+        """[cadences, temps par étape] prêts à afficher."""
+        s = self.snap
+        lim = "aucune" if not fps_limit else f"{fps_limit}"
+        ms = "  ".join(f"{k} {a:.1f}ms (max {m:.0f})" for k, (a, m) in s["ms"].items())
+        return [f"sortie {s['out']:.1f} fps (limite : {lim}) | webcam {s['cam']:.1f} fps", ms]
+
+
 def probe_camera(index):
     """(ok, luminosité moyenne) : une image ~0 = cache fermé / caméra désactivée."""
     cap = cv2.VideoCapture(index, CAP_API)
@@ -812,8 +883,14 @@ DEFAULTS = {
     "size": 1.2,
     "impact": 1.0,
     "mirror": False,
-    "width": 1280, "height": 720, "fps": 30,
+    "width": 1280, "height": 720,
+    "fps": 60,               # cadence de sortie (caméra virtuelle, animation de Sonic)
+    "cam_fps": 30,           # cadence demandée à la webcam (30 max pour la plupart)
 }
+# Mode debug (jamais sauvegardé : on revient en prod au prochain lancement) :
+#   sortie sans limite de fps, webcam à son max, mesures à l'écran et dans le journal.
+DEBUG_FPS = 0                # 0 = illimité
+DEBUG_CAM_FPS = 120          # la webcam répond avec son vrai maximum si elle ne peut pas
 
 
 def config_dir():
@@ -836,9 +913,13 @@ def load_config():
     for p in (os.path.join(ROOT, "config.json"), CONFIG):     # ancien emplacement puis le bon
         try:
             with open(p, encoding="utf-8") as fp:
-                cfg.update(json.load(fp))
+                saved = json.load(fp)
         except Exception:
-            pass
+            continue
+        # anciennes versions : "fps": 30 était écrit d'office (pas un choix de l'utilisateur) -> nouveau défaut
+        if "cam_fps" not in saved and saved.get("fps") == 30:
+            saved.pop("fps")
+        cfg.update(saved)
     return cfg
 
 
@@ -858,12 +939,26 @@ class Engine:
         self.on_frame = on_frame            # callback(image BGR) pour l'aperçu
         self.simulate, self.use_vcam, self.record = simulate, vcam, record
         self.seed, self.first_delay, self.duration = seed, first_delay, duration
-        self.debug = False
+        self.debug_mode = bool(self.cfg.get("debug"))      # mode debug : sans limite + mesures
+        self.debug = self.debug_mode                        # surimpression dans l'aperçu (touche D en CLI)
+        self.out_fps = self.cfg.get("debug_fps", DEBUG_FPS) if self.debug_mode else self.cfg["fps"]
+        self.cam_fps = self.cfg.get("debug_cam_fps", DEBUG_CAM_FPS) if self.debug_mode else self.cfg["cam_fps"]
+        self.perf = Perf()
+        self.cam_info = ""
         self.running = False
         self.thread = None
         self.director = None
         self.fx = None
         self.status = {"state": "démarrage", "camera": "", "vcam": "", "error": "", "fps": 0.0}
+
+    def debug_lines(self):
+        """Lignes de mesures à afficher par l'interface (mode debug)."""
+        perf = self.perf.lines(self.out_fps)
+        d = self.director
+        ev = (d.event.name if d.event else f"prochain dans {fmt_delay(d.next_in() or 0)}") if d else "-"
+        return [("DEBUG | " if self.debug_mode else "") + perf[0],
+                f"webcam : {self.cam_info or '?'}",
+                f"évènement : {ev}"] + [p.strip() for p in perf[1].split("  ") if p.strip()]
 
     # -- contrôle (appelable depuis un autre thread)
     def start(self):
@@ -920,13 +1015,25 @@ class Engine:
         if self.simulate:
             reader, vision = SimulatedScene(cfg["width"], cfg["height"]), None
             self.status["camera"] = "simulation"
+            self.cam_info = "scène simulée"
         else:
             source, name = resolve_camera(cfg.get("camera"))
             if isinstance(source, int) and is_virtual(name):
                 raise RuntimeError(f"« {name} » est une caméra virtuelle : choisissez votre vraie webcam.")
             self.status["camera"] = name
             LOG(f"Webcam utilisée : [{source}] {name}")
-            reader = CamReader(source, cfg["width"], cfg["height"], cfg["fps"])
+            if self.debug_mode:
+                LOG(f"MODE DEBUG : sortie {'illimitée' if not self.out_fps else f'{self.out_fps} fps'}, "
+                    f"webcam demandée à {self.cam_fps} fps")
+                fmts = camera_formats(source) if isinstance(source, int) else {}
+                if fmts:
+                    LOG("Formats annoncés par la webcam : " + ", ".join(
+                        f"{t} {w}x{h}@{f}" for (t, w, h), f in
+                        sorted(fmts.items(), key=lambda kv: (kv[0][0], -kv[0][1] * kv[0][2]))))
+                    LOG(f"Maximum matériel de cette webcam : {max(fmts.values())} fps")
+            reader = CamReader(source, cfg["width"], cfg["height"], self.cam_fps)
+            self.cam_info = reader.info()
+            LOG(f"Format webcam négocié : {self.cam_info}")
             reader.start()
             vision = Vision()
         vcam = writer = None
@@ -941,7 +1048,7 @@ class Engine:
             if self.use_vcam:
                 import pyvirtualcam
                 try:
-                    vcam = pyvirtualcam.Camera(W, H, cfg["fps"], fmt=pyvirtualcam.PixelFormat.BGR)
+                    vcam = pyvirtualcam.Camera(W, H, self.out_fps or 60, fmt=pyvirtualcam.PixelFormat.BGR)
                     self.status["vcam"] = vcam.device
                     LOG(f"Caméra virtuelle : {vcam.device}")
                 except Exception as e:
@@ -949,7 +1056,9 @@ class Engine:
                     self.status["error"] = f"Caméra virtuelle indisponible ({e}). {vcam_help()}"
                     LOG(self.status["error"])
             if self.record:
-                writer = cv2.VideoWriter(self.record, cv2.VideoWriter_fourcc(*"mp4v"), cfg["fps"], (W, H))
+                if not self.out_fps:
+                    LOG("[!] Enregistrement sans limite de fps : la vidéo est notée 60 fps, sa vitesse sera fausse.")
+                writer = cv2.VideoWriter(self.record, cv2.VideoWriter_fourcc(*"mp4v"), self.out_fps or 60, (W, H))
 
             tracker = FaceTracker()
             self.fx = fx = ImpactFX(cfg["impact"])
@@ -962,30 +1071,51 @@ class Engine:
             nxt = director.next_in()
             LOG(f"Première apparition dans {fmt_delay(nxt)}" if nxt is not None else "En pause")
             self.status["state"] = "actif"
-            t_start = last = time.perf_counter()
-            frame_dt = 1.0 / cfg["fps"]
+            t_start = last = last_log = time.perf_counter()
+            frame_dt = 1.0 / self.out_fps if self.out_fps else 0.0     # 0 = pas de limite
+            perf = self.perf = Perf()
+            n_loops = n_cam = 0
+            last_seq = -1
+            mask_cache = {}             # {"seq": n° d'image webcam, "mask": masque} : 1 détourage par image webcam
 
             while self.running:
-                frame = reader.read()
+                if self.simulate:
+                    seq, frame = n_loops, reader.read()
+                else:
+                    seq, frame = reader.read_seq()
+                new_cam = seq != last_seq
+                last_seq = seq
+                n_loops += 1
+                n_cam += new_cam
                 if cfg.get("mirror"):
                     frame = cv2.flip(frame, 1)
                 now = time.perf_counter()
                 dt = min(now - last, 0.1)
                 last = now
                 self.status["fps"] = self.status["fps"] * 0.9 + (1 / max(dt, 1e-3)) * 0.1
+                if perf.tick(new_cam, now) and self.debug_mode and now - last_log >= 5:
+                    last_log = now
+                    LOG("[debug] " + " | ".join(perf.lines(self.out_fps)))
 
+                # vision : seulement quand la webcam a livré une nouvelle image (sortie 60 fps, webcam 30 fps)
+                t0 = time.perf_counter()
                 if self.simulate:
                     face = tracker.update(reader.face, now)
-                    mask_cache = [reader.mask]
-                else:
+                    mask_cache = {"seq": seq, "mask": reader.mask}
+                elif new_cam:
                     face = tracker.update(vision.face(frame, now), now)
-                    mask_cache = []
+                else:
+                    face = tracker.get(now)
+                perf.add("visage", t0)
 
                 def get_mask():
-                    if not mask_cache:
-                        mask_cache.append(vision.person_mask(frame, now))
-                    return mask_cache[0]
+                    if mask_cache.get("seq") != seq:
+                        t_m = time.perf_counter()
+                        mask_cache["seq"], mask_cache["mask"] = seq, vision.person_mask(frame, now)
+                        perf.add("detourage", t_m)
+                    return mask_cache["mask"]
 
+                t0 = time.perf_counter()
                 ctx = Ctx(W, H, sprite, face, get_mask, cfg["size"])
                 draws = director.update(now, dt, ctx, fx)
 
@@ -1000,13 +1130,16 @@ class Engine:
                 if fx.active(now):
                     fx.overlay(out, now, face)
                     out = fx.camera_punch(out, now)
+                perf.add("compo", t0)       # inclut le détourage s'il a été calculé ici
 
+                t0 = time.perf_counter()
                 if vcam:
                     vcam.send(out)
                 if writer:
                     writer.write(out)
+                perf.add("envoi", t0)
                 if self.on_frame:
-                    if self.debug:
+                    if self.debug:              # uniquement dans l'aperçu, jamais dans Teams / Discord
                         out = out.copy()
                         if face:
                             cx, cy, fw, fh = face
@@ -1014,18 +1147,20 @@ class Engine:
                                           (int(cx + fw / 2), int(cy + fh / 2)), (0, 255, 0), 2)
                         if mask is not None:
                             out[..., 1] = np.maximum(out[..., 1], (mask * 120).astype(np.uint8))
-                        ev = director.event.name if director.event else \
-                            f"prochain dans {fmt_delay(director.next_in() or 0)}"
-                        cv2.putText(out, f"{self.status['fps']:.0f} fps | {ev}", (10, 30), 0, 0.8, (0, 255, 255), 2)
                     self.on_frame(out)
 
                 if self.duration and now - t_start > self.duration:
                     break
-                if vcam:
+                if not self.out_fps:
+                    time.sleep(0)               # illimité : on laisse juste respirer l'interface
+                elif vcam:
                     vcam.sleep_until_next_frame()
                 else:
                     time.sleep(max(0.0, frame_dt - (time.perf_counter() - now)))
         finally:
+            el = max(time.perf_counter() - t_start, 1e-3) if "t_start" in locals() else 0
+            if el:
+                LOG(f"Bilan : sortie {n_loops / el:.1f} fps, webcam {n_cam / el:.1f} fps")
             if not self.status["error"] or self.status["state"] == "actif":
                 self.status["state"] = "arrêté"
             reader.stop()
@@ -1067,7 +1202,10 @@ def main():
     ap.add_argument("--choose-camera", action="store_true", help="choisir et mémoriser la caméra")
     ap.add_argument("--width", type=int)
     ap.add_argument("--height", type=int)
-    ap.add_argument("--fps", type=int)
+    ap.add_argument("--fps", type=int, help="cadence de sortie (défaut 60 ; 0 = illimitée)")
+    ap.add_argument("--cam-fps", type=int, help="cadence demandée à la webcam (défaut 30)")
+    ap.add_argument("--debug", action="store_true",
+                    help="mode test : aucune limite de fps, webcam au max, mesures dans l'aperçu et la console")
     ap.add_argument("--min-gap", type=float, help="délai min entre deux apparitions (s), défaut 300")
     ap.add_argument("--max-gap", type=float, help="délai max entre deux apparitions (s), défaut 900")
     ap.add_argument("--first", type=float, help="délai avant la 1re apparition (s), défaut : aléatoire")
@@ -1090,17 +1228,24 @@ def main():
     if args.choose_camera:
         choose_camera_interactive()
         return
-    for k in ("camera", "width", "height", "fps", "min_gap", "max_gap", "slap_ratio", "size", "impact", "mirror"):
+    for k in ("camera", "width", "height", "fps", "cam_fps", "min_gap", "max_gap", "slap_ratio", "size", "impact",
+              "mirror"):
         v = getattr(args, k)
         if v is not None:
             cfg[k] = v
+    if args.debug:                      # --fps / --cam-fps restent prioritaires en debug
+        cfg["debug"] = True
+        if args.fps is not None:
+            cfg["debug_fps"] = args.fps
+        if args.cam_fps is not None:
+            cfg["debug_cam_fps"] = args.cam_fps
 
     latest = [None]
     engine = Engine(cfg, on_frame=None if args.no_preview else (lambda f: latest.__setitem__(0, f)),
                     simulate=args.simulate, vcam=not args.no_vcam, record=args.record, seed=args.seed,
                     first_delay=args.first, duration=args.duration)
     engine.start()
-    win = "Sonic Cam  [S] claque  [P] passage  [D] debug  [Q] quitter"
+    win = ("[DEBUG] " if args.debug else "") + "Sonic Cam  [S] claque  [P] passage  [D] debug  [Q] quitter"
     try:
         if args.no_preview:
             while engine.alive():
@@ -1109,7 +1254,15 @@ def main():
         while engine.alive():
             f = latest[0]
             if f is not None:
-                cv2.imshow(win, cv2.resize(f, (640, int(f.shape[0] * 640 / f.shape[1]))))
+                pv = cv2.resize(f, (640, int(f.shape[0] * 640 / f.shape[1])))
+                if engine.debug:
+                    lines = engine.debug_lines()
+                    cv2.rectangle(pv, (0, 0), (640, 8 + 18 * len(lines)), (0, 0, 0), -1)
+                    for i, txt in enumerate(lines):
+                        txt = unicodedata.normalize("NFKD", txt).encode("ascii", "ignore").decode()  # OpenCV : ASCII
+                        cv2.putText(pv, txt, (8, 20 + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                                    (0, 255, 255), 1, cv2.LINE_AA)
+                cv2.imshow(win, pv)
             key = cv2.waitKey(15) & 0xFF
             if key in (ord("q"), 27):
                 break

@@ -35,10 +35,11 @@ SINGLE_INSTANCE_PORT = 47653
 
 
 class App:
-    def __init__(self, lock_sock):
+    def __init__(self, lock_sock, debug=False):
         self.lock_sock = lock_sock
         self.cfg = sc.load_config()
         self.cfg.pop("paused", None)
+        self.cfg["debug"] = debug           # jamais sauvegardé : chaque lancement repart en prod
         self.log_lock = threading.Lock()
         self.logf = open(os.path.join(sc.config_dir(), "sonic_cam.log"), "a", encoding="utf-8")
         sc.LOG = self.log
@@ -115,8 +116,15 @@ class App:
         ttk.Checkbutton(f, text="Image miroir", variable=self.var_mirror,
                         command=self.on_mirror).grid(row=8, column=1, sticky="w", pady=2)
 
+        self.var_debug = tk.BooleanVar(value=bool(self.cfg.get("debug")))
+        ttk.Checkbutton(f, text="Mode debug (sans limite de fps + mesures)", variable=self.var_debug,
+                        command=self.on_debug).grid(row=9, column=1, sticky="w", pady=2)
+        self.lbl_debug = tk.Label(f, text="", justify="left", anchor="w", font=("TkFixedFont", 8),
+                                  fg="#7d5a00", wraplength=PREVIEW_W)
+        self.lbl_debug.grid(row=10, column=0, columnspan=3, sticky="w")
+
         self.lbl_hint = ttk.Label(f, text="", wraplength=PREVIEW_W, foreground="#2c6fbb")
-        self.lbl_hint.grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.lbl_hint.grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _cam_label(self, cam):
         if cam is None:
@@ -202,6 +210,11 @@ class App:
         if self.engine:
             self.engine.cfg["mirror"] = self.cfg["mirror"]
 
+    def on_debug(self):
+        self.cfg["debug"] = bool(self.var_debug.get())      # pas de save_config : réservé aux tests
+        self.log("Mode debug activé (sans limite de fps)" if self.cfg["debug"] else "Retour en mode normal")
+        self.restart_engine()                               # la cadence webcam se règle à l'ouverture
+
     def _load_cameras(self):                        # thread : la liste peut prendre un instant
         try:
             cams = [n for _, n in sc.list_cameras() if not sc.is_virtual(n)]
@@ -265,6 +278,7 @@ class App:
             parts.append(f"Sortie : {st['vcam']}")
         self.lbl_info.config(text="   ·   ".join(parts))
         self.lbl_err.config(text=st["error"])
+        self.lbl_debug.config(text="\n".join(e.debug_lines()) if e.debug_mode and st["state"] == "actif" else "")
         self.lbl_hint.config(text=f"Dans Teams / Discord, choisissez la caméra « {st['vcam']} »."
                              if st["vcam"] else "")
 
@@ -387,7 +401,7 @@ def main():
         from tkinter import messagebox
         messagebox.showinfo("Sonic Cam", "Sonic Cam est déjà lancé (regardez près de l'horloge).")
         return
-    App(lock).run()
+    App(lock, debug="--debug" in sys.argv).run()
 
 
 if __name__ == "__main__":
