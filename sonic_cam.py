@@ -4,9 +4,11 @@ sonic_cam.py  -  Caméra "Sonic Slap" pour Teams / Discord
 Webcam -> détection visage + segmentation de la personne (MediaPipe)
        -> Sonic (sprite détouré) qui apparaît au hasard, marche devant OU derrière vous,
           saute à côté de votre tête et vous colle une claque (tête qui part, shake, étincelles, joue rouge)
+          (ou Hornet, au choix, qui passe en dansant : pas de claque)
        -> caméra virtuelle OBS  (à choisir dans Teams / Discord : "OBS Virtual Camera")
 
 Touches (fenêtre d'aperçu) :  S = claque maintenant   P = passage derrière   D = debug   Q / Echap = quitter
+(S fait un simple passage si le personnage ne sait pas claquer)
 Lancer d'abord : python prepare_sonic.py
 """
 import argparse
@@ -241,31 +243,74 @@ class FaceTracker:
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  Sprite Sonic
+#  Sprites des personnages (assets/<perso>/meta.json + frame_XXX.png)
 # ════════════════════════════════════════════════════════════════════════════════
+DEFAULT_CHARACTER = "sonic"
+
+
+def list_characters():
+    """[(id, nom affiché)] des personnages présents dans assets/, Sonic en premier."""
+    out = []
+    try:
+        names = sorted(os.listdir(ASSETS))
+    except OSError:
+        names = []
+    for n in names:
+        meta_p = os.path.join(ASSETS, n, "meta.json")
+        if not os.path.isfile(meta_p):
+            continue
+        try:
+            with open(meta_p, encoding="utf-8") as fp:
+                label = json.load(fp).get("name") or n.capitalize()
+        except Exception:
+            continue
+        out.append((n, label))
+    out.sort(key=lambda c: (c[0] != DEFAULT_CHARACTER, c[0]))
+    return out
+
+
+def character_can_slap(name):
+    """Le perso a-t-il une claque ? (lit seulement meta.json, sans charger les images)"""
+    try:
+        with open(os.path.join(ASSETS, name or DEFAULT_CHARACTER, "meta.json"), encoding="utf-8") as fp:
+            meta = json.load(fp)
+        return bool(meta.get("slap_seq")) and meta.get("hand") is not None
+    except Exception:
+        return True                                             # perso inconnu -> Sonic
+
+
 class Sprite:
-    def __init__(self):
-        d = os.path.join(ASSETS, "sonic")
+    def __init__(self, name=DEFAULT_CHARACTER):
+        d = os.path.join(ASSETS, name)
         meta_p = os.path.join(d, "meta.json")
         if not os.path.exists(meta_p):
-            raise RuntimeError("Assets manquants : lancez d'abord  python prepare_sonic.py")
+            raise RuntimeError(f"Assets « {name} » manquants : lancez d'abord  python prepare_sonic.py")
         with open(meta_p, encoding="utf-8") as fp:
             self.meta = json.load(fp)
+        self.id = name
+        self.name = self.meta.get("name") or name.capitalize()
         self.frames = [cv2.imread(os.path.join(d, f"frame_{i:03d}.png"), cv2.IMREAD_UNCHANGED)
                        for i in range(self.meta["count"])]
         self.fps = self.meta["fps"]
         self.rx, self.ry = self.meta["ref"]
         self.char_h = self.meta["char_h"]
         self.walk = self.meta["walk_loop"]
-        self.seq = self.meta["slap_seq"]
-        self.impact = self.meta["impact_frame"]
-        hx, hy = self.meta["hand"]
-        self.hand_rel = (hx - self.rx, hy - self.ry)            # main à l'impact, relative aux pieds
+        self.walk_len = self.walk[1] - self.walk[0]
+        # avance par frame d'anim (en hauteurs de perso) et vitesse de lecture du passage
+        self.stride = self.meta.get("stride", STRIDE)
+        self.walk_speed = tuple(self.meta.get("walk_speed", (1.5, 1.9)))
+        # la claque n'existe que si la vidéo la contient (Hornet : passage seulement)
+        self.seq = self.meta.get("slap_seq")
+        self.can_slap = bool(self.seq) and self.meta.get("hand") is not None
         fr = self.meta["frames"]
         w0, w1 = self.walk
         self.ext_left = max(self.rx - fr[i]["ox"] for i in range(w0, w1))
         self.ext_right = max(fr[i]["ox"] + fr[i]["w"] - self.rx for i in range(w0, w1))
-        self.dash_frame = w0 + 16                               # foulée bien ouverte
+        if self.can_slap:
+            self.impact = self.meta["impact_frame"]
+            hx, hy = self.meta["hand"]
+            self.hand_rel = (hx - self.rx, hy - self.ry)        # main à l'impact, relative aux pieds
+            self.dash_frame = w0 + 16                           # foulée bien ouverte
 
     def draw(self, out, idx, ax, ay, sx, sy, flip, opacity=1.0, depth=0.0, mask=None):
         """Dessine la frame idx avec les pieds en (ax, ay). depth : 0 = devant, 1 = derrière la personne."""
@@ -375,7 +420,7 @@ class Ctx:
 
 
 class PassBy:
-    """Sonic traverse l'écran, le plus souvent DERRIÈRE la personne."""
+    """Le perso traverse l'écran, le plus souvent DERRIÈRE la personne."""
     name = "passby"
 
     def __init__(self, ctx, rng):
@@ -383,7 +428,7 @@ class PassBy:
         self.dir = rng.choice((-1, 1))
         self.flip = self.dir < 0
         self.depth = 1.0 if rng.random() < 0.75 else 0.0
-        self.speed = rng.uniform(1.5, 1.9)
+        self.speed = rng.uniform(*sp.walk_speed)
         s = ctx.front_scale(ctx.face) * rng.uniform(0.9, 1.1)
         if self.depth > 0:
             self.s = s * 0.72
@@ -394,8 +439,8 @@ class PassBy:
         lead, trail = (sp.ext_right, sp.ext_left) if self.dir > 0 else (sp.ext_left, sp.ext_right)
         self.x0 = -lead * self.s - 10 if self.dir > 0 else ctx.W + lead * self.s + 10
         self.x1 = ctx.W + trail * self.s + 10 if self.dir > 0 else -trail * self.s - 10
-        self.v = STRIDE * sp.char_h * self.s                    # px par frame d'anim (pieds qui ne glissent pas)
-        self.phase = rng.randrange(36)
+        self.v = sp.stride * sp.char_h * self.s                 # px par frame d'anim (pieds qui ne glissent pas)
+        self.phase = rng.randrange(sp.walk_len)
         self.a = 0.0
         self.done = False
         self.needs_mask = self.depth > 0
@@ -407,7 +452,7 @@ class PassBy:
         if (x - self.x1) * self.dir > 0:
             self.done = True
             return []
-        idx = sp.walk[0] + (int(self.a) + self.phase) % (sp.walk[1] - sp.walk[0])
+        idx = sp.walk[0] + (int(self.a) + self.phase) % sp.walk_len
         return [Draw(idx, x, self.ground, self.s, self.s, self.flip, 1.0, self.depth, 0.22)]
 
 
@@ -452,7 +497,7 @@ class SlapEvent:
             self.s_walk = self.s * 0.9
             self.ground = H * rng.uniform(0.96, 1.0)
             self.depth0 = 0.0
-        self.v = STRIDE * sp.char_h * self.s_walk
+        self.v = sp.stride * sp.char_h * self.s_walk
 
         # point de départ hors champ
         self.x0 = -sp.ext_right * self.s_walk - 10 if self.dir > 0 else W + sp.ext_right * self.s_walk + 10
@@ -565,8 +610,24 @@ class SlapEvent:
         return draws
 
 
-SPRITE = None
 STRIDE = 0.021      # avance par frame d'anim, en hauteurs de Sonic (calé sur la foulée de la vidéo)
+_SPRITES = {}       # cache {id: Sprite} : chaque perso n'est chargé qu'une fois
+_SPRITES_LOCK = threading.Lock()
+
+
+def get_sprite(name=None):
+    """Sprite du perso demandé (chargé une fois). Perso inconnu -> Sonic."""
+    name = name or DEFAULT_CHARACTER
+    with _SPRITES_LOCK:
+        if name not in _SPRITES:
+            if os.path.isfile(os.path.join(ASSETS, name, "meta.json")) or name == DEFAULT_CHARACTER:
+                _SPRITES[name] = Sprite(name)
+            else:                                               # mémorisé : prévenu une seule fois
+                LOG(f"Personnage « {name} » introuvable, retour à {DEFAULT_CHARACTER}")
+                if DEFAULT_CHARACTER not in _SPRITES:
+                    _SPRITES[DEFAULT_CHARACTER] = Sprite(DEFAULT_CHARACTER)
+                _SPRITES[name] = _SPRITES[DEFAULT_CHARACTER]
+        return _SPRITES[name]
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -700,7 +761,9 @@ class Director:
             return None
         return max(0.0, self.next_t - time.perf_counter())
 
-    def _pick(self):
+    def _pick(self, sprite):
+        if not sprite.can_slap:                                 # ex. Hornet : uniquement des passages
+            return "passby"
         p = self.slap_ratio
         if self.last_kind == "slap":                            # évite deux claques d'affilée trop souvent
             p *= 0.6
@@ -708,8 +771,10 @@ class Director:
 
     def update(self, now, dt, ctx, fx):
         if self.event is None and (self.forced or (now >= self.next_t and not self.paused)):
-            kind = self.forced or self._pick()
+            kind = self.forced or self._pick(ctx.sp)
             self.forced = None
+            if kind == "slap" and not ctx.sp.can_slap:
+                kind = "passby"
             if kind == "slap" and ctx.face is None:             # pas de visage -> on retente plus tard
                 self.next_t = now + 3
                 return []
@@ -717,7 +782,7 @@ class Director:
             self.last_kind = kind
             e = self.event
             where = "derrière" if getattr(e, "behind", getattr(e, "depth", 0) > 0) else "devant"
-            LOG(f"Sonic : {kind} ({where}, {'gauche->droite' if e.dir > 0 else 'droite->gauche'})")
+            LOG(f"{ctx.sp.name} : {kind} ({where}, {'gauche->droite' if e.dir > 0 else 'droite->gauche'})")
         if self.event is None:
             return []
         draws = self.event.update(dt, ctx, fx)
@@ -877,6 +942,7 @@ def vcam_help():
 # ════════════════════════════════════════════════════════════════════════════════
 DEFAULTS = {
     "camera": None,          # None = auto
+    "character": DEFAULT_CHARACTER,   # dossier dans assets/ : "sonic" (claque + passage) ou "hornet" (passage)
     "min_gap": 300.0,        # 5 min
     "max_gap": 900.0,        # 15 min
     "slap_ratio": 0.65,
@@ -994,6 +1060,15 @@ class Engine:
         if self.fx:
             self.fx.strength = v
 
+    def set_character(self, name):
+        """Change de perso à chaud : pris en compte dès que l'apparition en cours est finie."""
+        get_sprite(name)                                        # charge les images ici, pas dans la boucle vidéo
+        self.cfg["character"] = name
+
+    def sprite(self):
+        """Perso actuellement choisi (celui qui apparaîtra la prochaine fois)."""
+        return get_sprite(self.cfg.get("character"))
+
     def next_in(self):
         return self.director.next_in() if self.director else None
 
@@ -1009,9 +1084,9 @@ class Engine:
             self.running = False
 
     def _loop(self):
-        global SPRITE
         cfg = self.cfg
-        SPRITE = sprite = SPRITE or Sprite()
+        sprite = get_sprite(cfg.get("character"))
+        LOG(f"Personnage : {sprite.name}" + ("" if sprite.can_slap else " (passages uniquement)"))
         if self.simulate:
             reader, vision = SimulatedScene(cfg["width"], cfg["height"]), None
             self.status["camera"] = "simulation"
@@ -1116,6 +1191,8 @@ class Engine:
                     return mask_cache["mask"]
 
                 t0 = time.perf_counter()
+                if director.event is None:          # changement de perso : jamais au milieu d'une apparition
+                    sprite = get_sprite(cfg.get("character"))
                 ctx = Ctx(W, H, sprite, face, get_mask, cfg["size"])
                 draws = director.update(now, dt, ctx, fx)
 
@@ -1198,6 +1275,7 @@ def main():
     cfg = load_config()
     ap = argparse.ArgumentParser(description="Caméra Sonic Slap pour Teams / Discord (ligne de commande)")
     ap.add_argument("--camera", help="numéro ou nom (même partiel) de la webcam, ou chemin d'une vidéo")
+    ap.add_argument("--character", help="personnage : sonic (claque + passage) ou hornet (passage seulement)")
     ap.add_argument("--list-cameras", action="store_true", help="liste les caméras et quitte")
     ap.add_argument("--choose-camera", action="store_true", help="choisir et mémoriser la caméra")
     ap.add_argument("--width", type=int)
@@ -1228,8 +1306,8 @@ def main():
     if args.choose_camera:
         choose_camera_interactive()
         return
-    for k in ("camera", "width", "height", "fps", "cam_fps", "min_gap", "max_gap", "slap_ratio", "size", "impact",
-              "mirror"):
+    for k in ("camera", "character", "width", "height", "fps", "cam_fps", "min_gap", "max_gap", "slap_ratio", "size",
+              "impact", "mirror"):
         v = getattr(args, k)
         if v is not None:
             cfg[k] = v

@@ -49,6 +49,9 @@ class App:
         self.tray = None
         self.paused = False
         self.cams = []
+        self.characters = sc.list_characters() or [(sc.DEFAULT_CHARACTER, "Sonic")]
+        if self.cfg.get("character") not in dict(self.characters):
+            self.cfg["character"] = self.characters[0][0]
         self.hidden_once = False
         self._photo = None
 
@@ -86,45 +89,62 @@ class App:
 
         b = ttk.Frame(f)
         b.grid(row=4, column=0, columnspan=3, pady=8, sticky="ew")
-        ttk.Button(b, text="Claque maintenant", command=lambda: self.trigger("slap")).pack(side="left")
+        self.btn_slap = ttk.Button(b, text="Claque maintenant", command=lambda: self.trigger("slap"))
+        self.btn_slap.pack(side="left")
         ttk.Button(b, text="Passage", command=lambda: self.trigger("passby")).pack(side="left", padx=6)
         self.btn_pause = ttk.Button(b, text="Pause", command=self.toggle_pause)
         self.btn_pause.pack(side="left")
         self.btn_retry = ttk.Button(b, text="Réessayer", command=self.restart_engine)
 
-        ttk.Label(f, text="Webcam").grid(row=5, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Personnage").grid(row=5, column=0, sticky="w", pady=2)
+        self.cmb_char = ttk.Combobox(f, state="readonly", width=30, values=[c[1] for c in self.characters])
+        self.cmb_char.set(self._char_label(self.cfg.get("character")))
+        self.cmb_char.grid(row=5, column=1, sticky="ew")
+        self.cmb_char.bind("<<ComboboxSelected>>", self.on_character)
+
+        ttk.Label(f, text="Webcam").grid(row=6, column=0, sticky="w", pady=2)
         self.cmb_cam = ttk.Combobox(f, state="readonly", width=30, values=[AUTO])
         self.cmb_cam.set(self._cam_label(self.cfg.get("camera")))
-        self.cmb_cam.grid(row=5, column=1, sticky="ew")
+        self.cmb_cam.grid(row=6, column=1, sticky="ew")
         self.cmb_cam.bind("<<ComboboxSelected>>", self.on_camera)
         ttk.Button(f, text="↻", width=3, command=lambda: threading.Thread(
-            target=self._load_cameras, daemon=True).start()).grid(row=5, column=2, padx=(4, 0))
+            target=self._load_cameras, daemon=True).start()).grid(row=6, column=2, padx=(4, 0))
 
-        ttk.Label(f, text="Fréquence").grid(row=6, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Fréquence").grid(row=7, column=0, sticky="w", pady=2)
         self.cmb_freq = ttk.Combobox(f, state="readonly", width=30, values=[x[0] for x in FREQS])
         self.cmb_freq.set(self._freq_label())
-        self.cmb_freq.grid(row=6, column=1, sticky="ew")
+        self.cmb_freq.grid(row=7, column=1, sticky="ew")
         self.cmb_freq.bind("<<ComboboxSelected>>", self.on_freq)
 
-        ttk.Label(f, text="Effets").grid(row=7, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Effets").grid(row=8, column=0, sticky="w", pady=2)
         self.cmb_fx = ttk.Combobox(f, state="readonly", width=30, values=[x[0] for x in EFFECTS])
         self.cmb_fx.set(min(EFFECTS, key=lambda e: abs(e[1] - self.cfg["impact"]))[0])
-        self.cmb_fx.grid(row=7, column=1, sticky="ew")
+        self.cmb_fx.grid(row=8, column=1, sticky="ew")
         self.cmb_fx.bind("<<ComboboxSelected>>", self.on_effects)
 
         self.var_mirror = tk.BooleanVar(value=bool(self.cfg.get("mirror")))
         ttk.Checkbutton(f, text="Image miroir", variable=self.var_mirror,
-                        command=self.on_mirror).grid(row=8, column=1, sticky="w", pady=2)
+                        command=self.on_mirror).grid(row=9, column=1, sticky="w", pady=2)
 
         self.var_debug = tk.BooleanVar(value=bool(self.cfg.get("debug")))
         ttk.Checkbutton(f, text="Mode debug (sans limite de fps + mesures)", variable=self.var_debug,
-                        command=self.on_debug).grid(row=9, column=1, sticky="w", pady=2)
+                        command=self.on_debug).grid(row=10, column=1, sticky="w", pady=2)
         self.lbl_debug = tk.Label(f, text="", justify="left", anchor="w", font=("TkFixedFont", 8),
                                   fg="#7d5a00", wraplength=PREVIEW_W)
-        self.lbl_debug.grid(row=10, column=0, columnspan=3, sticky="w")
+        self.lbl_debug.grid(row=11, column=0, columnspan=3, sticky="w")
 
         self.lbl_hint = ttk.Label(f, text="", wraplength=PREVIEW_W, foreground="#2c6fbb")
-        self.lbl_hint.grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.lbl_hint.grid(row=12, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self._update_slap_button()
+
+    def _char_label(self, cid):
+        return dict(self.characters).get(cid) or dict(self.characters).get(sc.DEFAULT_CHARACTER, "Sonic")
+
+    def can_slap(self):
+        return sc.character_can_slap(self.cfg.get("character"))
+
+    def _update_slap_button(self):
+        self.btn_slap.state(["!disabled"] if self.can_slap() else ["disabled"])
 
     def _cam_label(self, cam):
         if cam is None:
@@ -174,6 +194,28 @@ class App:
             self.tray.update_menu()
 
     # ─────────────────────────────────────────────── réglages
+    def on_character(self, _=None):
+        label = self.cmb_char.get()
+        cid = next((i for i, n in self.characters if n == label), None)
+        if cid is None or cid == self.cfg.get("character"):
+            return
+        self.cfg["character"] = cid
+        sc.save_config(self.cfg)
+        self.log(f"Personnage choisi : {label}")
+
+        def worker():                                   # chargement des images hors du thread Tk
+            try:
+                if self.engine:
+                    self.engine.set_character(cid)
+                else:
+                    sc.get_sprite(cid)
+            except Exception as e:
+                self.log(f"Personnage « {label} » impossible à charger : {e}")
+            self.post(self._update_slap_button)
+            if self.tray:
+                self.tray.update_menu()
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_camera(self, _=None):
         label = self.cmb_cam.get()
         if label == AUTO:
@@ -262,7 +304,7 @@ class App:
         elif st["state"] == "actif":
             self.btn_retry.pack_forget()
             if e.director and e.director.event is not None:
-                txt = "● Sonic est là !"
+                txt = f"● {self._char_label(self.cfg.get('character'))} est là !"
             elif self.paused:
                 txt = "● En pause (les boutons marchent toujours)"
             else:
@@ -291,7 +333,8 @@ class App:
             M = pystray.MenuItem
             menu = pystray.Menu(
                 M("Afficher Sonic Cam", lambda: self.post(self.show), default=True),
-                M("Claque maintenant", lambda: self.post(lambda: self.trigger("slap"))),
+                M("Claque maintenant", lambda: self.post(lambda: self.trigger("slap")),
+                  enabled=lambda _: self.can_slap()),
                 M("Passage", lambda: self.post(lambda: self.trigger("passby"))),
                 M(lambda _: "Reprendre" if self.paused else "Pause", lambda: self.post(self.toggle_pause)),
                 pystray.Menu.SEPARATOR,
@@ -360,22 +403,27 @@ def selftest(out_path):
         if sc.IS_WIN:
             import pystray  # noqa: F401
             lines.append(f"cameras: {sc.list_cameras()}")
-        sc.SPRITE = sc.Sprite()
-        lines.append(f"sprite: {len(sc.SPRITE.frames)} frames")
+        chars = sc.list_characters()
+        if "hornet" not in dict(chars):
+            raise RuntimeError(f"personnage Hornet absent du paquet : {chars}")
+        for cid, _ in chars:
+            sp = sc.get_sprite(cid)
+            lines.append(f"sprite {cid}: {len(sp.frames)} frames, claque={sp.can_slap}")
         v = sc.Vision()
         frame = sc.SimulatedScene(640, 360).read()
         v.face(frame, 1.0)
         m = v.person_mask(frame, 1.1)
         lines.append(f"vision: mask {m.shape}")
-        eng = sc.Engine(sc.DEFAULTS, simulate=True, vcam=False, first_delay=0.2, duration=6)
-        eng.cfg.update(min_gap=1, max_gap=2, slap_ratio=1.0)
-        eng.running = True
-        eng._run()
-        if eng.status["error"]:
-            raise RuntimeError(eng.status["error"])
-        if eng.status["fps"] < 5:
-            raise RuntimeError("le moteur ne tourne pas")
-        lines.append(f"engine: {eng.status['fps']:.0f} fps")
+        for cid, _ in chars:
+            eng = sc.Engine(sc.DEFAULTS, simulate=True, vcam=False, first_delay=0.2, duration=6)
+            eng.cfg.update(min_gap=1, max_gap=2, slap_ratio=1.0, character=cid)
+            eng.running = True
+            eng._run()
+            if eng.status["error"]:
+                raise RuntimeError(eng.status["error"])
+            if eng.status["fps"] < 5:
+                raise RuntimeError("le moteur ne tourne pas")
+            lines.append(f"engine {cid}: {eng.status['fps']:.0f} fps")
         lines.append("OK")
         code = 0
     except Exception:
