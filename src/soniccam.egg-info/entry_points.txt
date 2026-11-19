@@ -1,0 +1,5 @@
+[console_scripts]
+soniccam = soniccam.cli:main
+
+[gui_scripts]
+soniccam-app = soniccam.app:main

@@ -26,8 +26,11 @@ NAME = "SonicCam"
 IS_WIN, IS_MAC = sys.platform.startswith("win"), sys.platform == "darwin"
 
 
+CHARACTERS = ("sonic", "hornet")       # dossiers de sprites embarqués dans l'appli
+
+
 def ensure_assets():
-    if os.path.exists(os.path.join(ASSETS, "sonic", "meta.json")) and \
+    if all(os.path.exists(os.path.join(ASSETS, c, "meta.json")) for c in CHARACTERS) and \
             os.path.exists(os.path.join(ASSETS, "models", "selfie_segmenter.tflite")):
         return
     print("Assets absents -> prepare_sonic.py")
@@ -69,7 +72,7 @@ def run_pyinstaller(png, ico):
         os.path.join(ROOT, "sonic_app.py"),
         "--name", NAME, "--noconfirm", "--clean", "--windowed", "--onedir",
         "--distpath", DIST, "--workpath", os.path.join(BUILD, "pyi"), "--specpath", BUILD,
-        "--add-data", f"{os.path.join(ASSETS, 'sonic')}{sep}assets/sonic",
+        *[x for c in CHARACTERS for x in ("--add-data", f"{os.path.join(ASSETS, c)}{sep}assets/{c}")],
         "--add-data", f"{os.path.join(ASSETS, 'models')}{sep}assets/models",
         "--add-data", f"{png}{sep}assets",
         "--collect-all", "mediapipe",

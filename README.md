@@ -2,6 +2,8 @@
 
 Votre webcam, avec un Sonic qui débarque au hasard **toutes les 5 à 15 minutes**. Il passe derrière vous ou devant, saute sur votre épaule et vous met une claque : la tête part, l'image tremble, la joue rougit. Ou alors il passe juste discrètement en arrière-plan.
 
+On peut aussi choisir **Hornet** à la place de Sonic : elle traverse l'écran en dansant (devant ou derrière vous), sans claque.
+
 ## Pour les utilisateurs : installer l'appli
 
 **Il faut dans tous les cas une caméra virtuelle**, c'est par elle que Teams et Discord reçoivent l'image :
@@ -17,6 +19,7 @@ Votre webcam, avec un Sonic qui débarque au hasard **toutes les 5 à 15 minutes
 ### La fenêtre de l'appli
 - **Aperçu** de ce qu'envoie la caméra, et le compte à rebours avant le prochain passage.
 - **Claque maintenant** / **Passage** pour déclencher Sonic à la main. **Pause** arrête les apparitions, mais la vidéo continue de passer.
+- **Personnage** : Sonic (claques et passages) ou Hornet (passages uniquement : le bouton « Claque maintenant » est alors grisé). Le changement s'applique à la prochaine apparition, sans redémarrer.
 - **Webcam** : choix de la vraie caméra. « Automatique » ignore les caméras virtuelles et celles qui renvoient une image noire.
 - **Fréquence** : 5 à 15 min par défaut. Il y a aussi un mode « Test : 10 à 30 s ».
 - **Effets** : discrets, normaux ou forts. **Image miroir** en option.
@@ -57,7 +60,7 @@ Chaque version est lancée en mode `--selftest` sur la machine de compilation : 
 
 ## Version script (développement)
 - `installer.bat` puis `lancer_sonic_cam.bat` (Windows), ou `python sonic_cam.py` partout.
-- Options : `--camera`, `--min-gap`, `--max-gap` (en secondes), `--size`, `--impact`, `--mirror`, `--simulate`, `--list-cameras`, `--choose-camera`.
+- Options : `--camera`, `--character` (`sonic` ou `hornet`), `--min-gap`, `--max-gap` (en secondes), `--size`, `--impact`, `--mirror`, `--simulate`, `--list-cameras`, `--choose-camera`.
 - Cadence : la sortie tourne à `--fps 60` par défaut (`0` = illimitée), et la webcam est lue à `--cam-fps 30`. La plupart des webcams plafonnent à 30 fps, et Teams/Discord transmettent souvent 30 fps au maximum.
 - `lancer_debug.bat` (ou `--debug`) lance le mode debug : aucune limite de fps, webcam au maximum, formats de la webcam listés au démarrage, mesures dans l'aperçu (touche D) et dans la console toutes les 5 s.
 - `python sonic_app.py` lance l'appli avec fenêtre, sans la compiler.
@@ -67,6 +70,7 @@ Chaque version est lancée en mode `--selftest` sur la machine de compilation : 
 |---|---|
 | `sonic_app.py` | Appli avec fenêtre (point d'entrée des versions compilées) |
 | `sonic_cam.py` | Moteur : vision, chorégraphie, effets, caméra virtuelle, plus la ligne de commande |
-| `prepare_sonic.py` | Détoure la vidéo et télécharge les modèles (déjà fait : voir `assets/`) |
+| `prepare_sonic.py` | Détoure les vidéos (Sonic, Hornet) et télécharge les modèles (déjà fait : voir `assets/`). `python prepare_sonic.py hornet` pour un seul perso |
+| `assets/sonic`, `assets/hornet` | Sprites détourés + `meta.json` (boucle, point des pieds, vitesse, claque ou non) |
 | `build.py` | Fabrique l'appli pour l'OS courant |
 | `.github/workflows/build.yml` | Fabrique les 3 versions sur GitHub |
