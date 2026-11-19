@@ -1,0 +1,16 @@
+numpy>=2.0
+opencv-python>=4.10
+mediapipe<2,>=1.2
+pyvirtualcam>=0.15
+pillow>=10
+
+[:sys_platform == "win32"]
+pystray>=0.19
+pygrabber>=0.2
+
+[build]
+pyinstaller>=6.10
+
+[dev]
+pytest>=8
+ruff>=0.6
